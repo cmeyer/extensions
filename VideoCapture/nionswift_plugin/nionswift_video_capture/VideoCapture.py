@@ -3,12 +3,15 @@ import gettext
 import logging
 import threading
 import time
+import typing
 
 # third party libraries
 import numpy
 
 # local libraries
-# None
+from nion.ui import Declarative
+from nion.utils import Model
+from nion.utils import Registry
 
 
 _ = gettext.gettext
@@ -47,13 +50,13 @@ MAX_FRAME_RATE = 20  # frames per second
 MINIMUM_DUTY = 0.05  # seconds
 TIMEOUT = 5.0  # seconds
 
-def video_capture_thread(video_capture, buffer, cancel_event, ready_event, done_event):
+def video_capture_thread(video_capture, buffer_ref, cancel_event, ready_event, done_event):
 
     while not cancel_event.is_set():
         start = time.time()
         retval, image = video_capture.read()
         if retval:
-            buffer[:] = image
+            buffer_ref[0] = numpy.copy(image)
             ready_event.set()
             done_event.wait()
             done_event.clear()
@@ -67,31 +70,29 @@ def video_capture_thread(video_capture, buffer, cancel_event, ready_event, done_
     video_capture.release()
 
 
-class VideoCaptureHardwareSourceDelegate(object):
+class VideoCamera:
 
-    def __init__(self, api):
-        self.__api = api
-        self.hardware_source_id = "video_capture"
-        self.hardware_source_name = _("Video Capture")
+    def __init__(self, source):
+        self.__source = source
+
+    def update_settings(self, settings: dict) -> None:
+        self.__source = settings.get("camera_index", settings.get("url"))
 
     def start_acquisition(self):
-        video_capture = cv2.VideoCapture(0)
-        width = video_capture.get(cv.CV_CAP_PROP_FRAME_WIDTH)
-        height = video_capture.get(cv.CV_CAP_PROP_FRAME_HEIGHT)
-        self.buffer = numpy.empty((height, width, 3), dtype=numpy.uint8)
+        video_capture = cv2.VideoCapture(self.__source)
+        self.buffer_ref = [None]
         self.cancel_event = threading.Event()
         self.ready_event = threading.Event()
         self.done_event = threading.Event()
-        self.thread = threading.Thread(target=video_capture_thread, args=(video_capture, self.buffer, self.cancel_event, self.ready_event, self.done_event))
+        self.thread = threading.Thread(target=video_capture_thread, args=(video_capture, self.buffer_ref, self.cancel_event, self.ready_event, self.done_event))
         self.thread.start()
 
-    def acquire_data_and_metadata(self):
-        api = self.__api
+    def acquire_data(self):
         self.ready_event.wait()
         self.ready_event.clear()
-        data = self.buffer.copy()
+        data = self.buffer_ref[0].copy()
         self.done_event.set()
-        return api.create_data_and_metadata_from_data(data)
+        return data
 
     def stop_acquisition(self):
         self.cancel_event.set()
@@ -99,17 +100,70 @@ class VideoCaptureHardwareSourceDelegate(object):
         self.thread.join()
 
 
+class VideoDeviceFactory:
+
+    display_name = _("Video Capture")
+    factory_id = "nionswift.video_capture"
+
+    def make_video_device(self, settings: dict) -> typing.Optional[VideoCamera]:
+        if settings.get("driver") == self.factory_id:
+            source = settings.get("camera_index", settings.get("url"))
+            video_device = VideoCamera(source)
+            video_device.camera_id = settings.get("device_id")
+            video_device.camera_name = settings.get("name")
+            return video_device
+        return None
+
+    def describe_settings(self) -> typing.List[typing.Dict]:
+        return [
+            {'name': 'camera_index', 'type': 'int'},
+            {'name': 'url', 'type': 'string'},
+        ]
+
+    def get_editor_description(self):
+        u = Declarative.DeclarativeUI()
+
+        url_field = u.create_line_edit(text="@binding(settings.url)", width=360)
+        camera_index_combo = u.create_combo_box(items=["None", "0", "1", "2", "3"], current_index="@binding(camera_index_model.value)")
+
+        label_column = u.create_column(u.create_label(text=_("URL:")), u.create_label(text=_("Camera Index (0 for none):")), spacing=4)
+        field_column = u.create_column(url_field, camera_index_combo, spacing=4)
+
+        return u.create_row(label_column, field_column, u.create_stretch(), spacing=12)
+
+    def create_editor_handler(self, settings):
+
+        class EditorHandler:
+
+            def __init__(self, settings):
+                self.settings = settings
+
+                self.camera_index_model = Model.PropertyModel()
+
+                def camera_index_changed(index):
+                    formats = [None, 0, 1, 2, 3]
+                    self.settings.camera_index = formats[index]
+
+                self.camera_index_model.on_value_changed = camera_index_changed
+
+            def init_handler(self):
+                self.camera_index_model.value = self.settings.camera_index + 1 if self.settings.camera_index is not None else 0
+
+        return EditorHandler(settings)
+
+
+
+
 # see http://docs.opencv.org/index.html
 # fail cleanly if not able to import
 import_error = False
 try:
     import cv2
-    import cv2.cv as cv
 except ImportError:
     import_error = True
 
 
-class VideoCaptureExtension(object):
+class VideoCaptureExtension:
 
     # required for Swift to recognize this as an extension class.
     extension_id = "nion.swift.extensions.video_capture"
@@ -122,11 +176,7 @@ class VideoCaptureExtension(object):
         if import_error:
             api.raise_requirements_exception(_("Could not import cv2."))
 
-        # be sure to keep a reference or it will be closed immediately.
-        self.__hardware_source_ref = api.create_hardware_source(VideoCaptureHardwareSourceDelegate(api))
+    Registry.register_component(VideoDeviceFactory(), {"video_device_factory"})
 
     def close(self):
-        # close will be called when the extension is unloaded. in turn, close any references so they get closed. this
-        # is not strictly necessary since the references will be deleted naturally when this object is deleted.
-        self.__hardware_source_ref.close()
-        self.__hardware_source_ref = None
+        pass
