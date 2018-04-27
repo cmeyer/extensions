@@ -64,8 +64,8 @@ def video_capture_thread(video_capture, buffer_ref, cancel_event, ready_event, d
             delay = max(1.0/MAX_FRAME_RATE - elapsed, MINIMUM_DUTY)
             cancel_event.wait(delay)
         else:
-            # we MUST give other threads a chance to process - so sleep here.
-            time.sleep(0.001)
+            buffer_ref[0] = None
+            ready_event.set()
 
     video_capture.release()
 
