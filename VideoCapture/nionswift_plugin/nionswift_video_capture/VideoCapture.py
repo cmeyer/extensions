@@ -146,7 +146,6 @@ class VideoDeviceFactory:
 
                 self.camera_index_model.on_value_changed = camera_index_changed
 
-            def init_handler(self):
                 self.camera_index_model.value = self.settings.camera_index + 1 if self.settings.camera_index is not None else 0
 
         return EditorHandler(settings)
